@@ -93,8 +93,8 @@ The YAML pipeline is structured into multiple stages:
 
 | Environment | URL |
 |-------------|-----|
-| **Staging** | [http://staging.azureb46.xyz:8080/](http://staging.crossbow54.xyz:8080/) |
-| **Production** | [http://prod.azureb46.xyz:8080/](http://prod.crossbow54.xyz:8080/) |
+| **Staging** | [http://staging.crossbow54.xyz:8080/] |
+| **Production** | [http://prod.crossbow54.xyz:8080/] |
 
 ---
 
