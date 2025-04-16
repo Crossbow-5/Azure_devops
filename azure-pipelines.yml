@@ -1,0 +1,437 @@
+trigger:
+  branches:
+    include:
+     - development
+     - uat
+     - production
+    exclude: ["master","feature*","releases/*"]
+  paths:
+    exclude:
+    - demofile-exclude.txt
+    - testfile*
+    - staging-*
+
+pool:
+  name: LinuxAgentPool
+  demands:
+  - Java -equals Yes
+  - Terraform -equals Yes
+  - Agent.Name -equals ADOAgent1
+
+variables:
+  global_version: '1.0.0'
+  global_email: 'globalvar@gmail.com'
+  azure_dev_sub: '9ce91e05-4b9e-4a42-95c1-4385c54920c6'
+  azure_prod_sub: '298f2c19-014b-4195-b821-e3d8fc25c2a8'
+  isDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/development')]
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/production')]
+
+stages:
+  - stage: CheckingTheADOAgentAndToolsStatus
+    condition: or(eq(variables.isProd, true), eq(variables.isDev, true))
+    pool:
+      name: LinuxAgentPool
+      demands:
+       - Terraform -equals Yes
+    variables:
+      stage_version: '2.0.0'
+      stage_email: 'stage1@gmail.com'
+    jobs:
+    - job: CheckingTerraformAndPacker
+      variables:
+        job_version: '3.0.0'
+        job_email: 'afrozmd.official@gmail.com'
+      timeoutInMinutes: 5
+      steps:
+        - script: echo $(Build.BuildId)
+          displayName: 'Display The Build-ID'
+        - script: terraform version && packer version 
+          displayName: 'Display Terraform & Packer Version'
+    # - job: CheckingDocker
+    #   dependsOn: CheckingTerraformAndPacker
+    #   variables:
+    #     job_version: '3.0.0'
+    #     job_email: 'afrozmd.official@gmail.com'
+    #   timeoutInMinutes: 5
+    #   steps:
+    #     - script: |
+    #         sudo docker version
+    #         sudo docker ps
+    #         sudo docker images
+    #         sudo docker ps -a
+    #       displayName: 'Display Docker Version'
+    # - job: CheckingAnsible
+    #   dependsOn: CheckingDocker
+    #   variables:
+    #     job_version: '3.0.0'
+    #     job_email: 'job3@gmail.com'
+    #   timeoutInMinutes: 5
+    #   steps:
+    #   - script: ansible --version && trivy --version
+    #     displayName: 'Display Ansiblee & Trivy Version'
+
+  - stage: SASTWithSonarQube
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+     name: LinuxAgentPool
+     demands:
+      - Terraform -equals Yes
+    jobs:
+    - job: RunningSASTWithSonarqube
+      timeoutInMinutes: 10
+      steps:
+        #SonarQube User Token need to be generated and used in the ServiceConnection.
+        #Also change name of the project and artifactId(line 6 & 14) to ado-spring-boot-app-dev in POM.
+        #No need to create a project in sonarqube as its created automatically.
+        - task: SonarQubePrepare@6
+          inputs:
+            SonarQube: 'sonarqube-service-connection'
+            scannerMode: 'Other'
+            #projectKey: 'sqp_63da7bac31bd4496f2ee1170156659ea8c782c28'-NotNeeded
+            #projectName: 'ado-spring-boot-app-dev'-NotNeeded
+            projectVersion: '$(Build.BuildId)'
+          displayName: "Preparing SonarQube Config"
+        - task: Maven@4
+          inputs:
+            mavenPomFile: 'pom.xml'
+            publishJUnitResults: false
+            javaHomeOption: 'JDKVersion'
+            mavenVersionOption: 'Default'
+            mavenAuthenticateFeed: false
+            effectivePomSkip: false
+            sonarQubeRunAnalysis: true
+            sqMavenPluginVersionChoice: 'latest'
+          displayName: "Running SonarQube Maven Analysis"
+          #Publish Report In Build Extentions
+        - task: SonarQubePublish@6
+          inputs:
+            pollingTimeoutSec: '300'
+          displayName: "Publish Qualitygate Report"
+        #Sonarqube webhook is not needed for Azure DevOps.
+        #Below Pluging Belog To "Plugins Pipelines Vendor Is Working"
+        - task: sonar-buildbreaker@9
+          inputs:
+           SonarQube: 'sonarqube-service-connection'
+          displayName: "SAST Job Fail or Pass"
+
+  - stage: BuildingJavaCodeWithMavenCopyArtifactToJFrog
+    condition: or(eq(variables.isProd, true), eq(variables.isDev, true))
+    #condition: always()
+    pool:
+     name: LinuxAgentPool
+     demands:
+      - Terraform -equals Yes
+    jobs:
+    - job: BuildingJavaCodeJob
+      timeoutInMinutes: 5
+      steps:
+        - script: ls -al && pwd && rm -rf /home/crossbow/.m2/settings.xml
+          displayName: 'List Files & Current Working Directory'
+        - task: DownloadSecureFile@1
+          inputs:
+            secureFile: 'settings.xml'
+        - task: CopyFiles@2
+          inputs:
+            SourceFolder: '$(Agent.TempDirectory)'
+            Contents: '**'
+            TargetFolder: '/home/crossbow/.m2'
+        - script: mvn versions:set -DnewVersion=Dev-2.0.$(Build.BuildId)
+          displayName: 'Set Maven Build Version'
+        - script: mvn -DskipTests=true clean package install && ls -al
+          displayName: 'Run the maven build and install'
+        - script: mvn -DskipTests=true deploy && ls -al
+          displayName: 'Run the maven deploy to JFrog Artifactory'
+          continueOnError: true
+          #Following steps are needed for Staging & Production Env Deployments.Dont Delete.
+        - script: ls -al && cp /home/crossbow/myagent/_work/1/s/target/ado-spring-boot-app-dev-Dev-2.0.$(Build.BuildId).jar ROOT$(Build.BuildId).jar && ls -al
+          displayName: 'List Files & Rename ROOT.jar'   
+        - script: rm -rf /artifacts/*.jar && cp ROOT$(Build.BuildId).jar /artifacts && ls -al /artifacts
+          displayName: 'Copy Artifact To Folder'
+        - task: CopyFiles@2
+          inputs:
+            Contents: 'ROOT$(Build.BuildId).jar'
+            TargetFolder: '$(Build.ArtifactStagingDirectory)'
+            OverWrite: true
+          displayName: 'Copying JAR file to ArtifactStagingDirector'
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'ROOT$(Build.BuildId).jar'
+            publishLocation: 'Container'
+          displayName: 'Publishing JAR Artifact.'
+
+  - stage: CopyingArtifactsToAzureAndAws
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+    - job: CopyFilesToAzureBlob
+      timeoutInMinutes: 5
+      steps:
+      - checkout: none         
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: 'azure-service-connection'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            az storage blob upload-batch --account-name devopsadoartifacts  --account-key $(STORAGE_ACCOUNT_KEY) --destination artifacts --source /home/crossbow/myagent/_work/1/s/target/ --pattern ado-spring-boot-app-dev-Dev-[0-9].[0-9].[0-100].jar
+        displayName: 'Upload Springboot Artifacts To Azure Blob'
+        continueOnError: true
+    - job: CopyFilesToAWSS3Bucket
+      dependsOn: CopyFilesToAzureBlob
+      condition: always() # succeededOrFailed() or always() or failed() or succeeded()-default
+      timeoutInMinutes: 5
+      steps:
+      - checkout: none                
+      - task: S3Upload@1
+        inputs:
+          awsCredentials: 'aws-service-connection'
+          regionName: 'us-east-1'
+          bucketName: 'devopsadoartifactss'
+          sourceFolder: '/home/crossbow/myagent/_work/1/s/target/'
+          globExpressions: '*.jar'
+        displayName: 'AWS Upload artifacts to AWS S3 Bucket'
+        continueOnError: true
+
+  - stage: DockerBuildAndTrivyScan
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+     name: LinuxAgentPool
+    jobs:
+    - job: BuildingContainerImageAndSecurityScanning
+      timeoutInMinutes: 10
+      steps:
+        - checkout: none
+        - script: sudo docker build -t afrozmd/myapp:$(Build.BuildId) .
+          displayName: 'Create Docker Image'
+        - script: sudo docker stop demoapp1
+          displayName: 'Stop demoapp1 container'
+          continueOnError: true
+        - script: sudo docker run --rm -d --name demoapp1 -p 8080:8080 afrozmd/myapp:$(Build.BuildId)
+          displayName: 'Deploy Docker Image For Testing'
+          continueOnError: true
+        #- script: trivy image --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml afrozmd/myapp:$(Build.BuildId)
+        - script: |
+           trivy image --exit-code 0 --severity LOW,MEDIUM --format template --template "@template/junit.tpl" -o junit-report-low-med.xml afrozmd/myapp:$(Build.BuildId)
+           trivy image --exit-code 0 --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml afrozmd/myapp:$(Build.BuildId)
+          displayName: 'Scan Image and Create Report'
+        - task: PublishTestResults@2
+          inputs: 
+           testResultsFormat: 'JUnit'
+           testResultsFiles: '**/junit-report-low-med.xml'
+           mergeTestResults: true
+           failTaskOnFailedTests: false
+           testRunTitle: 'Trivy - Low and Medium Vulnerabilities'
+          displayName: 'Trivy - Low and Medium Vulnerabilities'
+          condition: 'always()'
+        - task: PublishTestResults@2
+          inputs: 
+           testResultsFormat: 'JUnit'
+           testResultsFiles: '**/junit-report-high-crit.xml'
+           mergeTestResults: true
+           failTaskOnFailedTests: false
+           testRunTitle: 'Trivy - High and Critical Vulnerabilities'
+          displayName: 'Trivy - High and Critical Vulnerabilities'
+          condition: 'always()'
+  - stage: BuildDockerImagePushToAzureACRAndDockerHub
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+    - job: PushToAzureACR
+      #dependsOn: DockerBuildAndTrivyScan
+      condition: always() # succeededOrFailed() or always() or failed()
+      timeoutInMinutes: 5
+      steps:
+      - checkout: none
+      - task: Bash@3
+        inputs:
+          targetType: 'inline'
+          script: |
+            docker login -u devsecops_acr -p $(acrpassword) devsecops_acr.azurecr.io
+            docker tag afrozmd/myapp:$(Build.BuildId) devsecops_acr.azurecr.io/devsecops_acr:$(Build.BuildId)
+            docker push devsecops_acr.azurecr.io/devsecops_acr:$(Build.BuildId)
+        displayName: 'Creating & Pushing Docker Image To Azure ACR'
+    - job: PushToDockerHub
+      dependsOn: PushToAzureACR
+      condition: always() # succeededOrFailed() or always() or failed()
+      timeoutInMinutes: 5
+      steps:
+      - checkout: none
+      - task: Docker@2
+        inputs:
+          containerRegistry: 'dockerhub-service-connection'
+          command: 'login'
+        displayName: 'Login To Docker Hub'
+      - task: Bash@3
+        inputs:
+          targetType: 'inline'
+          script: |
+            docker tag afrozmd/myapp:$(Build.BuildId) afrozmd/devsecops_:$(Build.BuildId)
+            docker push afrozmd/devsecops_:$(Build.BuildId)
+        displayName: 'Pushing Docker Image To Docker Hub'
+
+  - stage: DeployDockerImageToAzureACI
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+     name: LinuxAgentPool
+    variables:
+      ACI_RG_NAME: 'AZB46ADO'
+      stage_email: 'stage1@gmail.com' 
+    jobs:
+     - job: DeployAzureACI
+       timeoutInMinutes: 10
+       steps:
+       - checkout: none
+       - task: AzureCLI@2
+         inputs:
+           azureSubscription: 'azure-service-connection'
+           scriptType: 'bash'
+           scriptLocation: 'inlineScript'
+           #inlineScript: 'az container create -g ${ACI_RG_NAME} --name devsecops_aci$(Build.BuildId) --image devsecops_acr.azurecr.io/devsecops_acr:$(Build.BuildId) --cpu 2 --memory 4 --ports 8080 --dns-name-label devsecops_aci$(Build.BuildId) --registry-username devsecops_acr --registry-password $(acrpassword) --location eastus'
+           inlineScript: az group list
+         displayName: 'Deploy Docker Image to Azure Container Instances'
+         continueOnError: true
+
+  - stage: 'DeployingToStagingEnvironment'
+    dependsOn: BuildingJavaCodeWithMavenCopyArtifactToJFrog
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool: LinuxAgentPool
+    displayName: 'Deploying To AWS Staging Environment'    
+    jobs:
+     - deployment: "DeployJARtoStagingServer"
+       environment: 
+         name: STAGING
+         resourceType: VirtualMachine
+       strategy:
+         runOnce:
+           deploy :
+             steps:
+              - script: PROC=$(ps -ef | grep -i jar | grep -v grep | awk {'print$2'}) && echo $PROC && sudo kill -9 $PROC
+                displayName: 'Stop Existing JAR File'
+                continueOnError: true 
+              - script: sudo java -jar /home/crossbow/azagent/_work/1/ROOT$(Build.BuildId).jar/ROOT$(Build.BuildId).jar &
+                displayName: 'Running The Jar File'
+                continueOnError: true
+          
+  - stage: ValidatingStagingDeploy
+    dependsOn: DeployingToStagingEnvironment
+    pool:
+     name: LinuxAgentPool
+     demands:
+      - Java -equals Yes
+    jobs:
+    - job: CheckingStagingDeployment
+      variables:
+        port_number: 200
+        STAG_URL: 'http://staging.crossbow54.xyz:8080/'
+      timeoutInMinutes: 2
+      steps:
+        - checkout: none
+        - script: |
+            RESPONSE=$(curl -o /dev/null -s -w "%{http_code}\n" $(STAG_URL))
+            if [ ${RESPONSE} -eq $(port_number) ]
+            then
+            echo "The RESPONSE IS $RESPONSE"
+            echo "DEPLOYMENT TO STAGING IS SUCESSFULL. PROCEED TO PRODUCTION."
+            else
+            echo "The RESPONSE IS $RESPONSE"
+            echo "DEPLOYMENT FAILED IN STAGING"
+            exit 1
+            fi
+          displayName: 'Testing Tomcat Deployment'
+
+#Execute the following commands on ADOAgent.
+#docker pull zaproxy/zap-stable
+#owasp/zap2docker-stable:latest
+#docker tag zaproxy/zap-stable:latest owasp/zap2docker-stable:latest
+
+  - stage: ZAPOWASPTestingStagingEnvironment
+    dependsOn: ValidatingStagingDeploy
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+    - job: ZapTestingStaging
+      timeoutInMinutes: 10
+      steps:
+      - checkout: none
+      - task: owaspzap@1
+        inputs:
+          scantype: 'targetedScan'
+          url: 'http://staging.crossbow54.xyz'
+          port: '8080'
+          threshold: '500'
+        displayName: 'DAST Staging Environment'
+        continueOnError: true
+      - task: PublishTestResults@2
+        displayName: 'Publish Test Results For ZAP Testing'
+        inputs:
+          testResultsFormat: 'NUnit'
+          testResultsFiles: 'report.html'
+        continueOnError: true
+
+  - stage: 'DeployingToProdEnvironment'
+    dependsOn: BuildingJavaCodeWithMavenCopyArtifactToJFrog
+    condition: and(succeeded('BuildingJavaCodeWithMavenCopyArtifactToJFrog'), eq(variables.isProd, true))
+    pool:
+      name: LinuxAgentPool
+    displayName: 'Deploying To AWS Prod Environment'    
+    jobs:
+     - deployment: "DeployJARtoProdServer"
+       environment: 
+         name: PROD
+         resourceType: VirtualMachine
+       strategy:
+         runOnce:
+           deploy :
+             steps:
+              - script: PROC=$(ps -ef | grep -i jar | grep -v grep | awk {'print$2'}) && echo $PROC && sudo kill -9 $PROC
+                displayName: 'Stop Existing JAR File'
+                continueOnError: true 
+              - script: sudo java -jar /home/crossbow/azagent/_work/1/ROOT$(Build.BuildId).jar/ROOT$(Build.BuildId).jar &
+                displayName: 'Running The Jar File'
+                continueOnError: true
+        
+  - stage: ValidatingProdDeploy
+    dependsOn: DeployingToProdEnvironment
+    condition: and(succeeded('DeployingToProdEnvironment'), eq(variables.isProd, true))
+    pool:
+      name: LinuxAgentPool
+    jobs:
+    - job: CheckingProductionDeployment
+      variables:
+        port_number: 200
+      timeoutInMinutes: 2
+      steps:
+        - checkout: none
+        - script: |
+            RESPONSE=$(curl -o /dev/null -s -w "%{http_code}\n" http://prod.crossbow54.xyz:8080/)
+            if [ ${RESPONSE} -eq $(port_number) ]
+            then
+            echo "The RESPONSE IS $RESPONSE"
+            echo "DEPLOYMENT TO PRODUCTION IS SUCESSFULL."
+            else
+            echo "The RESPONSE IS $RESPONSE"
+            echo "DEPLOYMENT FAILED IN PRODUCTION"
+            exit 1
+            fi
+          displayName: 'Testing Tomcat Deployment'
+                  
+  - stage: ZAPOWASPTestingProductionEnvironment
+    dependsOn: ValidatingProdDeploy
+    condition: and(succeeded('ValidatingProdDeploy'), eq(variables.isProd, true))
+    jobs:
+    - job: ZapTestingProduction
+      timeoutInMinutes: 10
+      steps:
+      - checkout: none
+      - task: owaspzap@1
+        inputs:
+          scantype: 'targetedScan'
+          url: 'http://prod.crossbow54.xyz'
+          port: '8080'
+          threshold: '500'
+        displayName: 'DAST Production Environment'
+        continueOnError: true
+      - task: PublishTestResults@2
+        displayName: 'Publish Test Results For ZAP Testing On Production'
+        inputs:
+          testResultsFormat: 'NUnit'
+          testResultsFiles: 'converted_report.xml'
+        continueOnError: true

@@ -1,0 +1,3 @@
+Welcome To DevOps and Azure Training In Telugu...!!
+https://github.com/microsoft/CSEDevOps/issues/47
+https://github.com/simondel/sonar-buildbreaker-vsts/issues/32#issuecomment-1593250792
