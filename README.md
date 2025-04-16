@@ -1,4 +1,4 @@
-# 🌐 End-to-End DevSecOps CI/CD Pipeline with Azure DevOps
+# 🌐 DevSecOps CI/CD Pipeline with Azure DevOps
 
 Welcome to my DevOps portfolio project! This repository contains a complete, production-grade CI/CD pipeline built using **Azure DevOps**, designed to support secure and scalable deployments of a **Spring Boot** application across **Dev**, **Staging**, and **Production** environments.
 
